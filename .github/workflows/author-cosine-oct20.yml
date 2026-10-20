@@ -1,0 +1,91 @@
+name: Author cosine validation October 20
+
+on:
+  push:
+    branches: [validation/cosine-low-precision-oct20]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  HEAD_SHA: 5f4554c1533a79933459e8cabdd784fe68237d71
+  BASE_SHA: f889c939725ad9367d915e7c69835c03835483fc
+  JAX_PLATFORMS: cpu
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - jax: '0.11.2'
+            scope: optax
+          - jax: '0.5.3'
+            scope: optax/losses
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          path: harness
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          path: head
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          ref: ${{ env.BASE_SHA }}
+          path: baseline
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548
+        with:
+          python-version: '3.12'
+      - name: Install exact JAX and test dependencies
+        run: |
+          python -m pip install -q -U pip
+          python -m pip install -q "jax[cpu]==${{ matrix.jax }}" './head[test]' pytest pytest-xdist pytest-subtests
+          python -m pip freeze > environment.txt
+          mkdir -p receipts
+      - name: Full scoped head and baseline suites and baseline negative control
+        run: |
+          python harness/validation/cosine_compare.py '${{ matrix.scope }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: cosine-jax-${{ matrix.jax }}
+          path: |
+            environment.txt
+            receipts/
+  lint-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          fetch-depth: 2
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548
+        with:
+          python-version: '3.12'
+      - name: Install tooling
+        run: |
+          python -m pip install -q -U pip
+          python -m pip install -q 'jax[cpu]==0.11.2' '.[test]' build pre-commit ruff flake8 pyink pyrefly pylint
+      - name: Precommit and linters
+        run: |
+          pre-commit run --files optax/losses/_regression.py optax/losses/_regression_test.py
+          ruff check .
+          python -m flake8 --select=E9,F63,F7,F82,E225,E251 --show-source --statistics
+          python -m pyink --target-version py310 --check optax/losses/_regression.py optax/losses/_regression_test.py
+          python -m pylint optax/losses/_regression.py optax/losses/_regression_test.py -d W0212,E1102
+      - name: Check types and build wheel
+        run: |
+          python -m pyrefly check
+          python -m build
+      - name: Install built wheel away from source and run regression tests
+        run: |
+          python -m pip install --no-deps --force-reinstall dist/*.whl
+          cd /tmp
+          python -c "import optax; print(optax.__file__); assert '/site-packages/' in optax.__file__"
+          python -m pytest -q --pyargs optax.losses._regression_test
+
